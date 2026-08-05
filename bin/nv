@@ -1,0 +1,151 @@
+#!/bin/bash
+# nv — native-vault: a thin, auditable wrapper around the OS-native keyvault.
+#
+# Design invariants (see docs/THREAT-MODEL.md):
+#   1. Secrets are generated BLIND: the value is created in this process,
+#      written straight into the native vault, and never printed anywhere.
+#   2. There is deliberately NO `get` verb. Nothing in this tool returns a
+#      secret in cleartext. The only manual escape hatch is the OS vault UI.
+#   3. Reading happens exclusively at injection time: `nv run` resolves
+#      references into the environment of the target process (HSM-call
+#      semantics) — never into files, logs, or command-line arguments.
+#
+# Backend: macOS Keychain (`security`). The vault's native session rules
+# apply unchanged: the login keychain is only available in an unlocked GUI
+# session — that is Apple's access model, not ours.
+
+set -euo pipefail
+
+CHARSET_DEFAULT='A-Za-z0-9!@#%^&*()_+=-'  # excludes quote/backslash/$/` on purpose
+LENGTH_DEFAULT=32
+
+die() { echo "nv: $*" >&2; exit 1; }
+
+usage() {
+	cat >&2 <<'EOF'
+usage:
+  nv generate <name> [-l <length>] [-f]   create a secret blind (never shown)
+  nv rotate   <name> [-l <length>]        overwrite with a fresh secret
+  nv import   <name>                      store an existing secret (TTY prompt)
+  nv run <VAR>=<name> [...] -- <cmd...>   resolve refs into the child's env
+  nv list [<prefix>]                      list secret names (names only)
+  nv delete   <name>                      remove a secret
+EOF
+	exit 64
+}
+
+require_backend() {
+	[ "$(uname)" = "Darwin" ] || die "only the macOS Keychain backend is implemented so far"
+	command -v security >/dev/null || die "missing 'security' CLI"
+}
+
+check_name() {
+	printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' \
+		|| die "invalid name '$1' (allowed: letters, digits, . _ -)"
+}
+
+# Write via `security -i` (commands over stdin) instead of -w on the argv:
+# process arguments are visible to other users via ps, stdin is not.
+keychain_store() { # $1=name $2=value
+	printf 'add-generic-password -U -a "%s" -s "%s" -w "%s"\n' "$USER" "$1" "$2" \
+		| security -i \
+		|| die "keychain write failed (locked? nv needs an unlocked GUI-session keychain)"
+}
+
+keychain_exists() { # $1=name
+	security find-generic-password -a "$USER" -s "$1" >/dev/null 2>&1
+}
+
+gen_value() { # $1=length
+	local raw
+	raw="$(head -c 4096 /dev/urandom | LC_ALL=C tr -dc "$CHARSET_DEFAULT")"
+	[ "${#raw}" -ge "$1" ] || die "entropy source failed"
+	printf '%s' "${raw:0:$1}"
+}
+
+cmd_generate() { # [-l N] [-f] name   (order-insensitive)
+	local length=$LENGTH_DEFAULT force=0 name=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			-l) shift; length="${1:-}" ;;
+			-f) force=1 ;;
+			-*) usage ;;
+			*)  [ -z "$name" ] || usage; name="$1" ;;
+		esac
+		shift
+	done
+	[ -n "$name" ] || usage
+	printf '%s' "$length" | grep -Eq '^[0-9]+$' && [ "$length" -ge 8 ] \
+		|| die "length must be a number >= 8"
+	check_name "$name"
+	if [ "$force" -eq 0 ] && keychain_exists "$name"; then
+		die "'$name' already exists (use 'nv rotate $name' to overwrite)"
+	fi
+	local value
+	value="$(gen_value "$length")"
+	keychain_store "$name" "$value"
+	echo "nv: '$name' stored (length $length). The value was not displayed and cannot be read back through nv."
+}
+
+cmd_import() { # name — value comes from a hidden interactive prompt, never from argv/pipes
+	[ $# -eq 1 ] || usage
+	check_name "$1"
+	[ -t 0 ] || die "import needs an interactive terminal (hidden prompt); secrets must not arrive via pipes or arguments"
+	# `security ... -w` without a value prompts twice with hidden input —
+	# the secret never passes through this script at all.
+	security add-generic-password -U -a "$USER" -s "$1" -w \
+		|| die "keychain write failed"
+	echo "nv: '$1' stored."
+}
+
+cmd_run() { # VAR=name [VAR=name...] -- cmd args...
+	local -a pairs=()
+	while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+		pairs+=("$1"); shift
+	done
+	[ "${1:-}" = "--" ] || usage
+	shift
+	[ $# -ge 1 ] || usage
+	[ "${#pairs[@]}" -ge 1 ] || usage
+	local pair var name value
+	for pair in "${pairs[@]}"; do
+		var="${pair%%=*}"; name="${pair#*=}"
+		[ "$var" != "$pair" ] || usage
+		printf '%s' "$var" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$' || die "invalid variable name '$var'"
+		check_name "$name"
+		value="$(security find-generic-password -a "$USER" -s "$name" -w 2>/dev/null)" \
+			|| die "no secret named '$name' (or keychain locked)"
+		export "$var"="$value"
+	done
+	unset value
+	exec "$@"
+}
+
+cmd_list() { # [prefix]
+	local prefix="${1:-}"
+	security dump-keychain 2>/dev/null \
+		| sed -n 's/^ *"svce"<blob>="\(.*\)"$/\1/p' \
+		| awk -v p="$prefix" 'p == "" || index($0, p) == 1' \
+		| sort -u
+}
+
+cmd_delete() {
+	[ $# -eq 1 ] || usage
+	check_name "$1"
+	security delete-generic-password -a "$USER" -s "$1" >/dev/null \
+		|| die "no secret named '$1'"
+	echo "nv: '$1' deleted."
+}
+
+[ $# -ge 1 ] || usage
+cmd="$1"; shift
+require_backend
+case "$cmd" in
+	generate) cmd_generate "$@" ;;
+	rotate)   cmd_generate -f "$@" ;;
+	import)   cmd_import "$@" ;;
+	run)      cmd_run "$@" ;;
+	list)     cmd_list "$@" ;;
+	delete)   cmd_delete "$@" ;;
+	*)        usage ;;
+esac

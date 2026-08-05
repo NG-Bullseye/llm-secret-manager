@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.native-vault.mcp</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>__REPO__/mcp/nv-mcp.py</string>
+		<string>--http</string>
+		<string>__PORT__</string>
+	</array>
+	<!-- Aqua only: the whole point is running inside the logged-in GUI
+	     session, where the login keychain is unlocked. When nobody is
+	     logged in, the server is down and the vault is sealed — that is
+	     the native semantic, not a bug. -->
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/tmp/native-vault-mcp.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/native-vault-mcp.log</string>
+</dict>
+</plist>
