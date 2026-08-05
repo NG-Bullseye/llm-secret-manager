@@ -1,103 +1,152 @@
 # native-vault
 
-**Let an LLM agent manage your secrets without ever being able to read them.**
+**Let AI agents manage your secrets — without ever being able to read them.**
 
-`native-vault` is a deliberately thin wrapper around the **OS-native keyvault**
-(macOS Keychain) plus a zero-dependency **MCP server**, so that AI agents can
-create, rotate, and *use* secrets — while the secret values never enter the
-agent's context, its logs, or its transcripts.
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python ≥ 3.9, stdlib only](https://img.shields.io/badge/python-%E2%89%A5%203.9%20%C2%B7%20zero%20deps-blue.svg)](mcp/nv-mcp.py)
+[![macOS Keychain](https://img.shields.io/badge/backend-macOS%20Keychain-black.svg)](bin/nv)
+[![MCP](https://img.shields.io/badge/protocol-MCP-purple.svg)](https://modelcontextprotocol.io)
 
-You don't have to trust this code with your secrets, because it doesn't hold
-any: storage and access control stay entirely with the operating system's own
-vault. The whole tool is a few hundred lines of shell and Python you can audit
-in one sitting. No dependencies, no custom crypto, no storage format.
+LLM agents are great at ops work — deploying, rotating credentials, wiring up
+services. But every secret that enters an agent's context lives on in
+transcripts, logs, and telemetry you don't control. The usual fix is "be
+careful". This is a better fix: **make it impossible.**
 
-## The model: the agent is an HSM operator, not a key holder
+`native-vault` turns your OS keyvault into something an agent operates **like
+an HSM**: it can order secrets into existence, rotate them, and run programs
+with them — but there is *no operation that returns a secret*. Not to the
+agent, not to a log, not "just for debugging".
+
+```text
+you      $ claude "create a DB password and run the migration with it"
+
+agent    → secret_generate("db-password")        ⇒ ok, length 32   (value never seen)
+agent    → secret_run(["python","manage.py","migrate"],
+                      env={"DB_PASSWORD": "db-password"})
+                                                 ⇒ exit 0          (value went kernel → process env)
+
+you      $ nv run DB_PASSWORD=db-password -- psql   # same reference, your shell
+```
+
+## Why you can trust it (hint: you don't have to)
+
+There is nothing here *to* trust. No custom crypto, no storage format, no
+server state, no dependencies. Storage, encryption, locking, and session
+binding are the **OS keyvault's own** (macOS login Keychain). `native-vault`
+is ~150 lines of shell and one stdlib-only Python file — auditable in one
+sitting — that only ever call the OS's native `security` tooling.
+
+## The three invariants
 
 1. **Blind generation.** `nv generate api-token` creates the value in a local
-   subprocess and writes it straight into the native vault. What comes back is
-   `stored (length 32)` — nothing else. The agent that *ordered* the secret has
-   never seen it.
-2. **No `get` verb — by design.** There is no command and no MCP tool that
-   returns a secret in cleartext. Not for the agent, not for a log line, not
-   "just for debugging". The only escape hatch is the OS vault UI
-   (Keychain Access), which is yours, not the agent's.
-3. **Reads resolve only at injection time.** Everywhere else, secrets exist
-   only as *references* (`DB_PASSWORD=api-token`). `nv run` resolves the
-   reference at the last possible moment — like an HSM call — directly into
-   the environment of the target process:
+   subprocess and writes it straight into the vault (via stdin — it never
+   appears in `ps`, files, or history). The agent that ordered it gets back:
+   `stored, length 32`. Nothing else.
 
-   ```bash
-   nv run DB_PASSWORD=api-token -- python manage.py migrate
-   ```
+2. **No `get` verb — by design.** Grep the code: there is no command and no
+   MCP tool that returns secret material. The only escape hatch is the OS
+   vault UI (Keychain Access), which is yours, not the agent's.
 
-   The value never touches disk, logs, shell history, or `ps` output (argv
-   carries only the reference). When the process exits, the value is gone.
+3. **Reads resolve only at injection time.** Everywhere else, secrets are
+   *references* (`DB_PASSWORD=api-token`). `nv run` resolves them at the last
+   possible moment, straight into the target process's environment — the
+   HSM-call pattern:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent (LLM)
+    participant N as nv / nv-mcp
+    participant K as OS Keychain
+    participant P as Target process
+    A->>N: secret_run(cmd, DB_PASSWORD=db-password)
+    N->>K: resolve reference
+    K-->>N: value (in-process only)
+    N->>P: exec cmd with value in env
+    P-->>N: exit code + output
+    N-->>A: exit code + output (exact value matches REDACTED)
+    Note over A: the value never enters the agent's context
+```
 
 ## Quickstart (macOS)
 
 ```bash
 git clone https://github.com/NG-Bullseye/native-vault && cd native-vault
-sudo ln -s "$PWD/bin/nv" /usr/local/bin/nv   # or add bin/ to PATH
+sudo ln -s "$PWD/bin/nv" /usr/local/bin/nv
 
-nv generate my-api-key            # blind: value is created and stored, never shown
+nv generate my-api-key            # blind: created and stored, never shown
 nv run API_KEY=my-api-key -- ./deploy.sh
 nv list my-                       # names only
 nv rotate my-api-key              # fresh value, same reference
-nv import legacy-password         # hidden interactive prompt (for existing secrets)
+nv import legacy-password         # hidden interactive prompt for existing secrets
 nv delete my-api-key
 ```
 
-The macOS Keychain's native rules apply unchanged: the login keychain is only
-available inside an **unlocked GUI session**. Over plain SSH, writes and reads
-fail — that is Apple's access model doing its job, and the reason the MCP
-server below runs as a LaunchAgent *inside* your session.
+Native rules apply unchanged: the login keychain only opens inside an
+**unlocked GUI session**. Over plain SSH, reads *and* writes fail — that's
+Apple's access model doing its job (and why the MCP server below runs as a
+LaunchAgent inside your session).
 
-## MCP server
+## MCP server: give every agent a vault, not a secret
 
-`mcp/nv-mcp.py` (Python ≥ 3.9, stdlib only) exposes the same verbs as MCP
-tools: `secret_generate`, `secret_rotate`, `secret_list`, `secret_delete`,
-`secret_run`. Secret values are resolved inside the server process and placed
-into the child's environment; any **exact occurrence of a resolved value in
-the captured output is redacted** before the result goes back to the client.
-
-Run inside your GUI session (recommended — this is what makes the keychain
-reachable for agents):
+`mcp/nv-mcp.py` (Python ≥ 3.9, **zero dependencies**) exposes five tools:
+`secret_generate` · `secret_rotate` · `secret_list` · `secret_delete` ·
+`secret_run`. Values resolve inside the server process and go into the child's
+environment; any **exact occurrence of a resolved value in captured output is
+redacted** before results return to the client.
 
 ```bash
-scripts/install-launchagent.sh          # starts http://127.0.0.1:8765/mcp
-```
-
-Register with your agent, e.g. Claude Code:
-
-```bash
+scripts/install-launchagent.sh    # → http://127.0.0.1:8765/mcp (loopback only)
 claude mcp add --transport http native-vault http://127.0.0.1:8765/mcp
 ```
 
-Remote agents (e.g. a headless box you trust) can reach it through an SSH
-tunnel — the server itself binds loopback only:
+Remote agents you trust (say, a headless build box) reach it through an SSH
+tunnel — the server never leaves loopback:
 
 ```bash
 ssh -N -L 8765:127.0.0.1:8765 your-mac &
-claude mcp add --transport http native-vault http://127.0.0.1:8765/mcp
 ```
 
-Stdio transport is also available (`python3 mcp/nv-mcp.py`), useful when the
-agent itself runs inside the GUI session.
+Log out of the Mac and the vault seals, the server loses access, and every
+agent is locked out at once. Nothing to revoke, nothing to remember —
+native semantics are the kill switch.
 
 ## What this protects against — and what it doesn't
 
-Honest scope (details in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)):
+- **Protects:** secrets leaking into LLM contexts and transcripts, logs,
+  shell history, process argv, files on disk, accidental echo (exact-match
+  redaction).
+- **Doesn't:** same-user privilege separation. Processes running as you, in
+  your unlocked session, are equal in the eyes of the OS. This is leak
+  prevention plus one auditable choke point — not a permission boundary. A
+  hostile agent could still tell a child process to re-encode and exfiltrate
+  a secret it legitimately received; the choke point makes exactly that
+  visible and greppable.
 
-- **Protects:** secrets leaking into LLM context/transcripts, logs, shell
-  history, process argv, files on disk, accidental echo (exact-match
-  redaction). Vault semantics (locking, GUI binding) remain the OS's.
-- **Does not protect:** processes running as the *same user* in an unlocked
-  session are equal in the eyes of the OS — this is leak prevention and
-  auditability, not privilege separation. A target process handed a secret
-  via `secret_run` can still do with it what it wants; at generation time the
-  value exists briefly in the generating subprocess's memory (as in any
-  system, including an HSM's caller).
+The full, honest version: [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
+
+## FAQ
+
+**Why not a password manager CLI (1Password `op`, Bitwarden `bw`, `pass`)?**
+Those are built for *humans reading secrets* — they all have a `get`. Their
+agent story is "pipe the secret into the model's shell and hope". native-vault
+is the inverse: the read path simply doesn't exist in the agent's toolset.
+
+**Why the OS keyvault instead of an encrypted file?**
+Because you already trust it — it holds your Wi-Fi and browser passwords, it
+locks with your session, it's maintained by your OS vendor. Adding parallel
+crypto would add a parallel thing to audit and break.
+
+**Linux / Windows?**
+The verb layer is backend-agnostic; macOS Keychain is the reference
+implementation. `secret-tool` (libsecret) and Windows Credential Manager
+backends are welcome — under the hard rule that they preserve the three
+invariants (see THREAT-MODEL.md, "Design consequences").
+
+**What about the moment of generation?**
+The generating subprocess holds the value in RAM for milliseconds — as does
+any system, HSM callers included. It's never printed, never persisted, and
+the process that *ordered* the generation (the agent) is a different process
+than the one that briefly held it. That separation is the point.
 
 ## License
 
