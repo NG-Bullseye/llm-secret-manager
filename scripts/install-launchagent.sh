@@ -5,7 +5,7 @@ set -euo pipefail
 
 PORT="${1:-8765}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.native-vault.mcp"
+LABEL="com.llm-secret-manager.mcp"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -22,6 +22,6 @@ if curl -s -o /dev/null "http://127.0.0.1:$PORT/mcp" -X POST \
 	-d '{"jsonrpc":"2.0","id":1,"method":"ping"}'; then
 	echo "nv-mcp running on http://127.0.0.1:$PORT/mcp"
 else
-	echo "installed, but the server did not answer yet — check /tmp/native-vault-mcp.log" >&2
+	echo "installed, but the server did not answer yet — check /tmp/llm-secret-manager-mcp.log" >&2
 	exit 1
 fi

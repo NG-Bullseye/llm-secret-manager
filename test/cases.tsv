@@ -1,0 +1,25 @@
+deny	security find-generic-password -s my-service -w
+deny	security find-internet-password -s example.com -w
+deny	python3 -c "import keyring; print(keyring.get_password('a','b'))"
+deny	env
+deny	printenv
+deny	env | grep KEY
+deny	echo $MY_API_KEY
+deny	echo "${MY_API_KEY}"
+deny	echo "${MY_API_KEY:-nicht gesetzt}"
+deny	printf "%s" "$GITHUB_TOKEN"
+deny	cat backend/.env
+deny	head -5 .env
+deny	less .env.local
+allow	ls -la
+allow	git status
+allow	npm run build
+allow	with-secrets MY_API_KEY=my-service -- python manage.py runserver
+allow	with-secrets --check MY_API_KEY=my-service
+allow	env -u MY_API_KEY ./venv/bin/python manage.py check
+allow	echo "${#MY_API_KEY}"
+allow	echo "${MY_API_KEY:+gesetzt}"
+allow	printf "%s\n" "${MY_API_KEY:+ok}"
+allow	security find-generic-password -s my-service
+allow	grep -oE "^[A-Za-z_]+=" backend/.env
+allow	docker compose up -d db

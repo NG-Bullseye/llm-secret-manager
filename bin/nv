@@ -1,5 +1,5 @@
 #!/bin/bash
-# nv — native-vault: a thin, auditable wrapper around the OS-native keyvault.
+# nv — llm-secret-manager: a thin, auditable wrapper around the OS-native keyvault.
 #
 # Design invariants (see docs/THREAT-MODEL.md):
 #   1. Secrets are generated BLIND: the value is created in this process,

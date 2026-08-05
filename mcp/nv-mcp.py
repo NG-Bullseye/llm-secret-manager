@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nv-mcp — MCP server for native-vault. Zero dependencies, Python >= 3.9.
+"""nv-mcp — MCP server for llm-secret-manager. Zero dependencies, Python >= 3.9.
 
 Exposes the nv verbs as MCP tools so an LLM agent can operate the vault
 without ever seeing a secret:
@@ -218,7 +218,7 @@ def handle(msg):
         return ok({
             "protocolVersion": client_version,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "native-vault", "version": VERSION},
+            "serverInfo": {"name": "llm-secret-manager", "version": VERSION},
         })
     if method == "ping":
         return ok({})

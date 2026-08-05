@@ -1,6 +1,7 @@
-# native-vault
+# llm-secret-manager
 
-**Let AI agents manage your secrets — without ever being able to read them.**
+**The secret manager for LLM agents: they can create, rotate, and use your
+secrets — without ever being able to read them.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python ≥ 3.9, stdlib only](https://img.shields.io/badge/python-%E2%89%A5%203.9%20%C2%B7%20zero%20deps-blue.svg)](mcp/nv-mcp.py)
@@ -12,10 +13,12 @@ services. But every secret that enters an agent's context lives on in
 transcripts, logs, and telemetry you don't control. The usual fix is "be
 careful". This is a better fix: **make it impossible.**
 
-`native-vault` turns your OS keyvault into something an agent operates **like
-an HSM**: it can order secrets into existence, rotate them, and run programs
-with them — but there is *no operation that returns a secret*. Not to the
-agent, not to a log, not "just for debugging".
+`llm-secret-manager` turns your OS keyvault into something an agent operates
+**like an HSM**: it can order secrets into existence, rotate them, and run
+programs with them — but there is *no operation that returns a secret*. Not to
+the agent, not to a log, not "just for debugging". Three layers, use any or
+all: the **`nv` CLI**, a zero-dependency **MCP server**, and a Claude Code
+**guard hook** that blocks commands which would print a secret.
 
 ```text
 you      $ claude "create a DB password and run the migration with it"
@@ -70,7 +73,7 @@ sequenceDiagram
 ## Quickstart (macOS)
 
 ```bash
-git clone https://github.com/NG-Bullseye/native-vault && cd native-vault
+git clone https://github.com/NG-Bullseye/llm-secret-manager && cd llm-secret-manager
 sudo ln -s "$PWD/bin/nv" /usr/local/bin/nv
 
 nv generate my-api-key            # blind: created and stored, never shown
@@ -109,6 +112,29 @@ ssh -N -L 8765:127.0.0.1:8765 your-mac &
 Log out of the Mac and the vault seals, the server loses access, and every
 agent is locked out at once. Nothing to revoke, nothing to remember —
 native semantics are the kill switch.
+
+## Enforcement: the guard hook
+
+The vault layer makes leaks unnecessary; the guard makes them **hard even on
+purpose**. `hooks/guard-secrets.sh` is a Claude Code PreToolUse hook that
+denies Bash commands which would write a secret into the agent's context —
+before they run, even in `bypassPermissions` mode:
+
+```bash
+./install.sh        # installs with-secrets + the guard hook (idempotent)
+```
+
+Blocked: cleartext keychain reads (`security ... -w`), keychain reads through
+interpreters (`keyring.get_password`, …), full environment dumps
+(`env`/`printenv`), `echo`/`printf` of secret-looking variables — including
+the sneaky `${VAR:-fallback}`, which returns the *value* when set. Still
+allowed: injection without printing (`nv run`, `with-secrets`) and existence
+checks via `${#VAR}`. Test suite: `test/run-tests.sh`.
+
+`bin/with-secrets` is the standalone injector for pre-existing secrets
+(`with-secrets VAR=service -- cmd`, plus `--check` to verify presence by
+length only) — same invariants, no vault management, works without the MCP
+server.
 
 ## What this protects against — and what it doesn't
 

@@ -37,8 +37,10 @@
 - **A hostile agent instructing a child to exfiltrate.** `secret_run` executes
   a command the agent chose; that command could re-encode the secret (base64,
   etc.) and print it, bypassing exact-match redaction. Mitigations: the choke
-  point makes such behavior visible and greppable; restrict which commands the
-  agent may run at your agent-framework layer if this is in your threat model.
+  point makes such behavior visible and greppable; the PreToolUse guard hook
+  (`hooks/guard-secrets.sh`) denies the common print paths before they run;
+  restrict which commands the agent may run at your agent-framework layer if
+  this is in your threat model.
 - **In-memory exposure at use time.** The resolving process and the target
   process hold the value in RAM while running. No software vault — hardware
   HSMs included — can hand a usable secret to a process without that process
