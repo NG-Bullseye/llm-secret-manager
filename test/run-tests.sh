@@ -37,5 +37,5 @@ while IFS="$(printf '\t')" read -r expected cmd; do
 	fi
 done < "$CASES"
 
-printf '\n%d ok, %d fehlgeschlagen\n' "$pass" "$fail"
+printf '\n%d ok, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

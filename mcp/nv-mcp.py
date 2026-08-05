@@ -255,7 +255,10 @@ def serve_stdio():
 
 
 def serve_http(port):
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    # ThreadingHTTPServer, not HTTPServer: MCP clients keep the first
+    # connection alive, and a single-threaded server would block every
+    # further connection behind it (tools/list would just time out).
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -290,7 +293,7 @@ def serve_http(port):
         def do_DELETE(self):
             self._send(200)
 
-    httpd = HTTPServer(("127.0.0.1", port), Handler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     httpd.serve_forever()
 
 

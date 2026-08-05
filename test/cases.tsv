@@ -6,7 +6,7 @@ deny	printenv
 deny	env | grep KEY
 deny	echo $MY_API_KEY
 deny	echo "${MY_API_KEY}"
-deny	echo "${MY_API_KEY:-nicht gesetzt}"
+deny	echo "${MY_API_KEY:-not set}"
 deny	printf "%s" "$GITHUB_TOKEN"
 deny	cat backend/.env
 deny	head -5 .env
@@ -18,7 +18,7 @@ allow	with-secrets MY_API_KEY=my-service -- python manage.py runserver
 allow	with-secrets --check MY_API_KEY=my-service
 allow	env -u MY_API_KEY ./venv/bin/python manage.py check
 allow	echo "${#MY_API_KEY}"
-allow	echo "${MY_API_KEY:+gesetzt}"
+allow	echo "${MY_API_KEY:+is-set}"
 allow	printf "%s\n" "${MY_API_KEY:+ok}"
 allow	security find-generic-password -s my-service
 allow	grep -oE "^[A-Za-z_]+=" backend/.env
