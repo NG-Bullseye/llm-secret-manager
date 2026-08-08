@@ -1,0 +1,7 @@
+# Python bytecode — build artifacts, never source of truth.
+# mcp/__pycache__/nv-mcp.cpython-312.pyc had been committed since the
+# keychain-secret-guard consolidation: it pins one interpreter version
+# (3.12), goes stale the moment nv-mcp.py changes, and adds an opaque
+# binary to a repo whose entire pitch is auditability.
+__pycache__/
+*.py[cod]
