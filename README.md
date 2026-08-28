@@ -89,13 +89,55 @@ Native rules apply unchanged: the login keychain only opens inside an
 Apple's access model doing its job (and why the MCP server below runs as a
 LaunchAgent inside your session).
 
+## Shared vaults: the Bitwarden backend
+
+The login keychain is *yours*. Team and customer secrets usually live in a
+shared vault instead, and `nv` cannot reach those. `bin/bwv` is the same
+contract against Bitwarden:
+
+```bash
+export BWV_BOOTSTRAP=my-bitwarden           # keychain item holding the master password
+
+bwv list 'Railway · '                       # item names only
+bwv check TOKEN='Railway · Token:Token'     # → TOKEN: 36 chars   (never the value)
+bwv run TOKEN='Railway · Token:Token' -- ./deploy.sh
+```
+
+There is no `get` verb here either. The vault is unlocked for exactly one
+resolution pass and locked again; the session key is never persisted.
+
+Three things it does differently from a hand-rolled `bw` wrapper, each because
+the naive version bit someone:
+
+- **Exact item names.** `bw get item` matches substrings, so `Railway · Token`
+  can resolve to several items and fail — or worse, to the wrong one. A
+  reference that does not match exactly one item is an error.
+- **`bw sync` first.** An item created in the web or desktop app is invisible
+  to the CLI until a sync. Skipping it produces "no such item" for an item you
+  are looking at on screen.
+- **Explicit fields.** `:<field>` selects a login field (`username`,
+  `password`) or a custom field by exact name; without it, login password then
+  custom field `wert`. When resolution fails, the error names the fields the
+  item actually has — that one line is usually the whole debugging session.
+
+The master password comes from the OS keychain via `bin/with-secrets`, so the
+unlock chain still ends in the native vault: no second credential store, and
+the same GUI-session rule applies. Machine callers export `BW_PASSWORD`
+directly instead (that is how the MCP server and the LaunchAgent run).
+
 ## MCP server: give every agent a vault, not a secret
 
-`mcp/nv-mcp.py` (Python ≥ 3.9, **zero dependencies**) exposes five tools:
+`mcp/nv-mcp.py` (Python ≥ 3.9, **zero dependencies**) exposes eight tools:
 `secret_generate` · `secret_rotate` · `secret_list` · `secret_delete` ·
-`secret_run`. Values resolve inside the server process and go into the child's
+`secret_run` for the keychain, and `bw_list` · `bw_check` · `bw_run` for
+Bitwarden. Values resolve inside the server process and go into the child's
 environment; any **exact occurrence of a resolved value in captured output is
 redacted** before results return to the client.
+
+On the Bitwarden path the server never holds the value at all — `bwv` resolves
+it in its own child — so `bw_run` passes `--redact`, which makes `bwv` filter
+the output before it comes back. Same guarantee, enforced one process further
+out.
 
 ```bash
 scripts/install-launchagent.sh    # → http://127.0.0.1:8765/mcp (loopback only)

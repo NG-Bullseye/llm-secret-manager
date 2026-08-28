@@ -1,0 +1,204 @@
+#!/bin/bash
+# bwv — llm-secret-manager: Bitwarden backend, same invariants as bin/nv.
+#
+# Design invariants (see docs/THREAT-MODEL.md):
+#   1. There is deliberately NO `get` verb. Nothing here returns a secret in
+#      cleartext. `check` reports value LENGTHS, so a reference can be debugged
+#      without revealing what it points at.
+#   2. Reading happens exclusively at injection time: `bwv run` resolves
+#      references into the environment of the target process (HSM-call
+#      semantics) — never into files, logs, or command-line arguments.
+#   3. The vault is unlocked for exactly one resolution pass and locked again.
+#      The session key is never persisted.
+#
+# Backend: Bitwarden CLI (`bw`). Unlike bin/nv, the vault is not OS-native, so
+# the master password needs a bootstrap. It is read from a keychain item named
+# by BWV_BOOTSTRAP through bin/with-secrets. Over SSH the login keychain is
+# locked, so that path fails by design — export BW_PASSWORD instead, which is
+# how the MCP server and the LaunchAgent call this.
+#
+# Why not a shell function: a function is reachable only from the interactive
+# shell that defined it. Scripts, Python, LaunchAgents, CI and agent tooling
+# all need an executable on PATH.
+
+set -euo pipefail
+
+die() { echo "bwv: $*" >&2; exit 1; }
+
+usage() {
+	cat >&2 <<'EOF'
+usage:
+  bwv list [<prefix>]                              list item names (never values)
+  bwv check <VAR>=<item>[:<field>] [...]           report value lengths only
+  bwv run [--redact] <VAR>=<item>[:<field>] [...] -- <cmd...>
+                                                   resolve refs into the child's env
+
+--redact captures the child's output and replaces exact occurrences of every
+resolved value with [REDACTED:VAR] before passing it on. Without it the child
+inherits this terminal directly, which is what a human wants; machine callers
+(the MCP server) must use it so no value can travel back in a tool result.
+
+<item> is the EXACT Bitwarden item name; quote it, names contain spaces and "·".
+A substring match would be ambiguous ("Railway · X" vs "GitHub Actions · X"),
+so a reference that does not match exactly one item is an error.
+
+Field resolution per reference:
+  :<field> given  -> "username"/"password" select the login fields, anything
+                     else selects the custom field of that exact name
+  no :<field>     -> login password, else custom field "wert"
+EOF
+	exit 64
+}
+
+# --- inner pass: runs with BW_PASSWORD in the environment, nothing else ------
+# Re-executing this same file instead of embedding the logic in a quoted string
+# keeps it readable: no nested escaping, and the code below is parsed by bash
+# normally rather than assembled at runtime.
+if [ "${BWV_INNER:-}" = 1 ]; then
+	unset BWV_INNER
+	export PATH=/usr/local/bin:/opt/homebrew/bin:$PATH
+	command -v bw >/dev/null || die "missing 'bw' CLI"
+
+	BW_SESSION="$(bw unlock --passwordenv BW_PASSWORD --raw)" || die "unlock failed"
+	export BW_SESSION
+	unset BW_PASSWORD
+	# Items created in the web or desktop app are invisible to the CLI until a
+	# sync. Skipping this produced a "no such item" for an item that existed.
+	bw sync >/dev/null 2>&1 || true
+
+	mode="$1"; shift
+
+	# The JSON filters live in variables, not heredocs: a heredoc would become
+	# python3's stdin and displace the piped `bw list` output.
+	list_py="$(cat <<'PY'
+import json, os, sys
+prefix = os.environ.get("BWV_PREFIX", "")
+for name in sorted(i.get("name", "") for i in json.load(sys.stdin)):
+    if name.startswith(prefix):
+        print(name)
+PY
+	)"
+
+	resolve_py="$(cat <<'PY'
+import json, os, sys
+name = os.environ["BWV_NAME"]
+field = os.environ["BWV_FIELD"]
+items = [i for i in json.load(sys.stdin) if i.get("name") == name]
+if len(items) != 1:
+    sys.stderr.write("bwv: %d items named %r\n" % (len(items), name))
+    sys.exit(1)
+item = items[0]
+login = item.get("login") or {}
+custom = {f.get("name"): f.get("value") for f in (item.get("fields") or [])}
+if field in ("username", "password"):
+    value = login.get(field)
+elif field:
+    value = custom.get(field)
+else:
+    value = login.get("password") or custom.get("wert")
+if not value:
+    want = field or "password / wert"
+    sys.stderr.write("bwv: item %r has no %s (fields: %s)\n"
+                     % (name, want, ", ".join(sorted(k for k in custom if k)) or "none"))
+    sys.exit(1)
+sys.stdout.write(value)
+PY
+	)"
+
+	if [ "$mode" = list ]; then
+		prefix="${1:-}"
+		bw list items 2>/dev/null | BWV_PREFIX="$prefix" python3 -c "$list_py"
+		bw lock >/dev/null 2>&1 || true
+		exit 0
+	fi
+
+	status=0
+	redact_vars=""
+	while IFS= read -r spec; do
+		[ -n "$spec" ] || continue
+		var="${spec%%=*}"; ref="${spec#*=}"
+		field=""
+		# Split on the LAST colon: item names may contain colons themselves.
+		case "$ref" in *:*) field="${ref##*:}"; ref="${ref%:*}" ;; esac
+
+		value="$(bw list items --search "$ref" 2>/dev/null \
+			| BWV_NAME="$ref" BWV_FIELD="$field" python3 -c "$resolve_py" \
+		)" || { status=1; continue; }
+
+		if [ "$mode" = check ]; then
+			echo "$var: ${#value} chars"
+		else
+			export "$var=$value"
+			redact_vars="$redact_vars $var"
+		fi
+	done <<< "$BWV_SPECS"
+
+	unset value
+	bw lock >/dev/null 2>&1 || true
+	unset BW_SESSION BWV_SPECS
+	[ "$status" -eq 0 ] || exit "$status"
+	[ "$mode" = check ] && exit 0
+
+	if [ "${BWV_REDACT:-}" = 1 ]; then
+		unset BWV_REDACT
+		export BWV_REDACT_VARS="$redact_vars"
+		exec python3 "$BWV_SELF_DIR/bwv-redact.py" "$@"
+	fi
+	exec "$@"
+fi
+
+# --- outer pass: argument parsing, then hand off with the master password ----
+[ $# -ge 1 ] || usage
+mode="$1"; shift
+
+case "$mode" in
+	list)
+		[ $# -le 1 ] || usage
+		specs=()
+		;;
+	check|run)
+		specs=()
+		if [ "$mode" = run ] && [ "${1:-}" = "--redact" ]; then
+			export BWV_REDACT=1
+			shift
+		fi
+		while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+			case "$1" in *=*) specs+=("$1") ;; *) usage ;; esac
+			shift
+		done
+		[ "${#specs[@]}" -ge 1 ] || usage
+		if [ "$mode" = run ]; then
+			[ "${1:-}" = "--" ] || usage
+			shift
+			[ $# -ge 1 ] || usage
+		fi
+		for spec in "${specs[@]}"; do
+			var="${spec%%=*}"
+			printf '%s' "$var" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$' \
+				|| die "invalid variable name '$var'"
+		done
+		;;
+	*) usage ;;
+esac
+
+export BWV_SPECS
+BWV_SPECS="$( [ "${#specs[@]}" -gt 0 ] && printf '%s\n' "${specs[@]}" || true )"
+
+BWV_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export BWV_SELF_DIR
+self="$BWV_SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
+
+# BW_PASSWORD already present (MCP server, LaunchAgent, CI): use it directly.
+# Otherwise bootstrap it out of the keychain, which needs an unlocked GUI
+# session — the same constraint bin/nv documents.
+if [ -n "${BW_PASSWORD:-}" ]; then
+	exec env BWV_INNER=1 "$self" "$mode" "$@"
+fi
+
+bootstrap="${BWV_BOOTSTRAP:-}"
+[ -n "$bootstrap" ] || die "set BWV_BOOTSTRAP to the keychain item holding the Bitwarden master password (or export BW_PASSWORD)"
+
+with_secrets="$(dirname "$self")/with-secrets"
+[ -x "$with_secrets" ] || die "$with_secrets missing"
+
+exec "$with_secrets" "BW_PASSWORD=$bootstrap" -- env BWV_INNER=1 "$self" "$mode" "$@"

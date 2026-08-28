@@ -32,6 +32,10 @@ NV_BIN = os.environ.get(
     "NV_BIN",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "nv"),
 )
+BWV_BIN = os.environ.get(
+    "BWV_BIN",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "bwv"),
+)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -109,6 +113,67 @@ TOOLS = [
             "required": ["command", "env"],
         },
     },
+    {
+        "name": "bw_list",
+        "description": (
+            "List Bitwarden item names (names only, never values). Use this to "
+            "find the exact item name a reference needs -- references must match "
+            "an item name exactly."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"prefix": {"type": "string", "default": ""}},
+        },
+    },
+    {
+        "name": "bw_check",
+        "description": (
+            "Report the LENGTH of Bitwarden values without revealing them. "
+            "`refs` maps environment variable names to item references "
+            "('<item>' or '<item>:<field>'). Use this to verify a reference "
+            "resolves before wiring it into a command."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "refs": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "mapping VAR -> '<item>' or '<item>:<field>'",
+                },
+            },
+            "required": ["refs"],
+        },
+    },
+    {
+        "name": "bw_run",
+        "description": (
+            "Run a command with Bitwarden values resolved into its environment "
+            "at the last possible moment. `refs` maps environment variable names "
+            "to item references ('<item>' or '<item>:<field>'). The values are "
+            "resolved inside the bwv child and never enter this server; any exact "
+            "occurrence of a resolved value in the captured output is redacted "
+            "there before it is returned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "argv of the command to run",
+                },
+                "refs": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "mapping VAR -> '<item>' or '<item>:<field>'",
+                },
+                "cwd": {"type": "string"},
+                "timeout_s": {"type": "integer", "default": 120},
+            },
+            "required": ["command", "refs"],
+        },
+    },
 ]
 
 
@@ -117,6 +182,29 @@ def nv(*args, timeout=30):
         [NV_BIN, *args], capture_output=True, text=True, timeout=timeout
     )
     return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+
+def bwv(*args, timeout=120, cwd=None):
+    """Invoke the Bitwarden backend. Only references travel on argv; the
+    resolved values stay inside the bwv child and never reach this process."""
+    p = subprocess.run(
+        [BWV_BIN, *args], capture_output=True, text=True, timeout=timeout, cwd=cwd
+    )
+    return p.returncode, p.stdout, p.stderr
+
+
+def bw_specs(refs):
+    """Turn a {VAR: reference} mapping into bwv's VAR=<ref> argument list."""
+    specs = []
+    for var, ref in refs.items():
+        if not VAR_RE.match(var):
+            raise ValueError(f"invalid variable name '{var}'")
+        if not isinstance(ref, str) or not ref:
+            raise ValueError(f"invalid reference for '{var}'")
+        specs.append(f"{var}={ref}")
+    if not specs:
+        raise ValueError("refs must not be empty")
+    return specs
 
 
 def resolve_secret(name):
@@ -198,6 +286,40 @@ def tool_call(name, args):
             out = out.replace(value, f"[REDACTED:{var}]")
             err = err.replace(value, f"[REDACTED:{var}]")
         return {"exit_code": p.returncode, "stdout": out[-20000:], "stderr": err[-20000:]}
+
+    if name == "bw_list":
+        prefix = args.get("prefix") or ""
+        code, out, err = bwv("list", *([prefix] if prefix else []))
+        if code != 0:
+            raise ValueError(err.strip() or "bwv list failed")
+        return {"names": out.splitlines()}
+
+    if name == "bw_check":
+        specs = bw_specs(args["refs"])
+        code, out, err = bwv("check", *specs)
+        if code != 0:
+            raise ValueError(err.strip() or "bwv check failed")
+        # bwv prints "VAR: N chars" per reference; hand back structured data.
+        lengths = {}
+        for line in out.splitlines():
+            var, _, rest = line.partition(":")
+            lengths[var.strip()] = int(rest.strip().split()[0])
+        return {"lengths": lengths}
+
+    if name == "bw_run":
+        command = args["command"]
+        if not isinstance(command, list) or not command:
+            raise ValueError("command must be a non-empty argv array")
+        specs = bw_specs(args["refs"])
+        # --redact is mandatory on this path: the server never holds the values,
+        # so it cannot recognise them itself -- bwv, which does hold them,
+        # filters the child's output before it ever comes back here.
+        code, out, err = bwv(
+            "run", "--redact", *specs, "--", *command,
+            timeout=int(args.get("timeout_s", 120)),
+            cwd=args.get("cwd") or None,
+        )
+        return {"exit_code": code, "stdout": out[-20000:], "stderr": err[-20000:]}
 
     raise ValueError(f"unknown tool '{name}'")
 
