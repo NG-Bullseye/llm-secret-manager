@@ -30,6 +30,7 @@ usage() {
 usage:
   bwv list [<prefix>]                              list item names (never values)
   bwv import <item>[:<field>]                      store a value (hidden prompt)
+  bwv delete <item>                                remove an item
   bwv check <VAR>=<item>[:<field>] [...]           report value lengths only
   bwv run [--redact] <VAR>=<item>[:<field>] [...] -- <cmd...>
                                                    resolve refs into the child's env
@@ -80,6 +81,17 @@ for name in sorted(i.get("name", "") for i in json.load(sys.stdin)):
 PY
 	)"
 
+	id_py="$(cat <<'PY'
+import json, os, sys
+name = os.environ["BWV_NAME"]
+items = [i for i in json.load(sys.stdin) if i.get("name") == name]
+if len(items) != 1:
+    sys.stderr.write("bwv: %d items named %r\n" % (len(items), name))
+    sys.exit(1)
+sys.stdout.write(items[0]["id"])
+PY
+	)"
+
 	resolve_py="$(cat <<'PY'
 import json, os, sys
 name = os.environ["BWV_NAME"]
@@ -109,6 +121,15 @@ PY
 	if [ "$mode" = list ]; then
 		prefix="${1:-}"
 		bw list items 2>/dev/null | BWV_PREFIX="$prefix" python3 -c "$list_py"
+		bw lock >/dev/null 2>&1 || true
+		exit 0
+	fi
+
+	if [ "$mode" = delete ]; then
+		id="$(bw list items --search "$1" 2>/dev/null \
+			| BWV_NAME="$1" python3 -c "$id_py")" || { bw lock >/dev/null 2>&1 || true; exit 1; }
+		bw delete item "$id" >/dev/null || { bw lock >/dev/null 2>&1 || true; die "delete failed"; }
+		echo "bwv: '$1' deleted."
 		bw lock >/dev/null 2>&1 || true
 		exit 0
 	fi
@@ -165,7 +186,7 @@ case "$mode" in
 		[ $# -le 1 ] || usage
 		specs=()
 		;;
-	import)
+	import|delete)
 		[ $# -eq 1 ] || usage
 		specs=()
 		;;

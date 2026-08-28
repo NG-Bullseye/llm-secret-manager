@@ -102,6 +102,7 @@ bwv list 'Railway · '                       # item names only
 bwv import 'Railway · Token:Token'          # hidden prompt, creates or updates
 bwv check TOKEN='Railway · Token:Token'     # → TOKEN: 36 chars   (never the value)
 bwv run TOKEN='Railway · Token:Token' -- ./deploy.sh
+bwv delete 'Railway · Token'                # exact name, or it refuses
 ```
 
 There is no `get` verb here either. The vault is unlocked for exactly one
