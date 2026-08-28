@@ -2,9 +2,22 @@
 """bwv-import — store a value into a Bitwarden item without it passing through
 argv, a file, or the terminal echo.
 
-Called by `bwv import <item>[:<field>]` inside the unlocked child, so BW_SESSION
-is already in the environment. The value is read from a hidden prompt (twice,
-and the two must match), then handed to `bw` on stdin via `bw encode`.
+Two entry points, for two different origins of the value:
+
+  <item>[:<field>]                 `bwv import` — the value exists elsewhere
+                                   (a provider's web UI) and a human types it.
+                                   Hidden prompt, twice, and they must match.
+                                   Needs a TTY: a pipe would mean the value
+                                   came from a file, an argument or a chat.
+
+  --generate <length> <item>[:...] `bwv generate` — nothing to type. The value
+                                   is drawn from os.urandom here and goes
+                                   straight into the vault. No TTY, because no
+                                   human is involved; this is the path an agent
+                                   uses through the MCP server.
+
+Called inside the unlocked child, so BW_SESSION is already in the environment.
+The value is handed to `bw` on stdin via `bw encode`, never on argv.
 
 Creates a secure note when the item does not exist yet and updates it in place
 when it does — rotation is the common case, and an agent that has to delete and
@@ -16,12 +29,16 @@ the same reason bin/nv has none.
 import getpass
 import json
 import os
+import secrets
 import subprocess
 import sys
 
 DEFAULT_FIELD = "wert"
 SECURE_NOTE = 2  # bitwarden item type
 FIELD_HIDDEN = 1  # custom field type: hidden
+# Same alphabet as bin/nv: no quote, backslash, $ or backtick, so a generated
+# value cannot break out of a shell string it is later interpolated into.
+CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#%^&*()_+=-"
 
 
 def bw(*args, stdin=None):
@@ -76,16 +93,32 @@ def set_field(item, field, value):
 
 
 def main():
-    if len(sys.argv) != 2:
-        sys.stderr.write("usage: bwv-import.py <item>[:<field>]\n")
+    argv = sys.argv[1:]
+    length = None
+    if argv[:1] == ["--generate"]:
+        if len(argv) != 3:
+            sys.stderr.write("usage: bwv-import.py --generate <length> <item>[:<field>]\n")
+            return 64
+        length = int(argv[1])
+        if length < 8:
+            raise RuntimeError("length must be >= 8")
+        argv = argv[2:]
+    if len(argv) != 1:
+        sys.stderr.write("usage: bwv-import.py [--generate <length>] <item>[:<field>]\n")
         return 64
-    ref = sys.argv[1]
+
+    ref = argv[0]
     name, sep, field = ref.rpartition(":")
     if not sep:
         name, field = ref, DEFAULT_FIELD
 
     existing = find_item(name)
-    value = read_value(name, field)
+    if length is None:
+        value = read_value(name, field)
+    else:
+        # Blind: generated here, written straight to the vault. The caller that
+        # ordered it gets back name and length, nothing else.
+        value = "".join(secrets.choice(CHARSET) for _ in range(length))
 
     if existing:
         set_field(existing, field, value)

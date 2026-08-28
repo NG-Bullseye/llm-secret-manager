@@ -99,7 +99,8 @@ contract against Bitwarden:
 export BWV_BOOTSTRAP=my-bitwarden           # keychain item holding the master password
 
 bwv list 'Railway · '                       # item names only
-bwv import 'Railway · Token:Token'          # hidden prompt, creates or updates
+bwv generate 'Railway · Token' 40           # blind: random value, never shown
+bwv import 'Railway · Token:Token'          # hidden prompt, for a value that exists
 bwv check TOKEN='Railway · Token:Token'     # → TOKEN: 36 chars   (never the value)
 bwv run TOKEN='Railway · Token:Token' -- ./deploy.sh
 bwv delete 'Railway · Token'                # exact name, or it refuses
@@ -108,12 +109,17 @@ bwv delete 'Railway · Token'                # exact name, or it refuses
 There is no `get` verb here either. The vault is unlocked for exactly one
 resolution pass and locked again; the session key is never persisted.
 
-`import` is the rotation path: it reads the value from a hidden prompt (twice,
-and they must match), then hands it to `bw` on stdin — never through argv, a
-file, or a chat message. An existing item is updated in place rather than
-recreated, so it keeps its folder and history. It refuses to run without a
-terminal, because a pipe means the value came from somewhere it should not
-have been.
+`generate` and `import` differ only in where the value comes from, and that
+difference decides who may call them. `generate` draws it from `os.urandom`
+and writes it straight to the vault — no human, no terminal, and therefore the
+path an agent uses. `import` is for a value that already exists somewhere else
+(a provider's web UI) and has to be typed: hidden prompt, twice, and they must
+match. It refuses to run without a terminal, because a pipe would mean the
+value came from a file, an argument, or a chat message.
+
+Both hand the value to `bw` on stdin, never through argv, and both update an
+existing item in place rather than recreating it, so it keeps its folder and
+history — that is the rotation path.
 
 Three things it does differently from a hand-rolled `bw` wrapper, each because
 the naive version bit someone:
@@ -136,12 +142,24 @@ directly instead (that is how the MCP server and the LaunchAgent run).
 
 ## MCP server: give every agent a vault, not a secret
 
-`mcp/nv-mcp.py` (Python ≥ 3.9, **zero dependencies**) exposes eight tools:
+`mcp/nv-mcp.py` (Python ≥ 3.9, **zero dependencies**) exposes ten tools:
 `secret_generate` · `secret_rotate` · `secret_list` · `secret_delete` ·
-`secret_run` for the keychain, and `bw_list` · `bw_check` · `bw_run` for
-Bitwarden. Values resolve inside the server process and go into the child's
-environment; any **exact occurrence of a resolved value in captured output is
-redacted** before results return to the client.
+`secret_run` for the keychain, and `bw_list` · `bw_check` · `bw_run` ·
+`bw_generate` · `bw_delete` for Bitwarden. Shared rules (reference syntax,
+exact-name matching, "no tool returns a value") are sent once in the server's
+`instructions` rather than repeated in every description — those descriptions
+sit in the model's context for the whole session, so they are kept to one line
+each.
+
+`bwv import` deliberately has **no** MCP tool. It is the path for a value that
+already exists somewhere else and a human has to type it; a tool for that would
+only invite an agent to route the secret through its own context first. What an
+agent needs instead is `bw_generate`, which orders a value into existence
+without anyone seeing it.
+
+Values resolve inside the server process and go into the child's environment;
+any **exact occurrence of a resolved value in captured output is redacted**
+before results return to the client.
 
 On the Bitwarden path the server never holds the value at all — `bwv` resolves
 it in its own child — so `bw_run` passes `--redact`, which makes `bwv` filter

@@ -39,18 +39,26 @@ BWV_BIN = os.environ.get(
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# Shared rules live here, not repeated in every tool description: this is sent
+# once at initialize, while descriptions are carried in the model's context for
+# the whole session.
+INSTRUCTIONS = """secret_* = macOS keychain, bw_* = Bitwarden. No tool returns a value:
+to use one, inject it with *_run; to verify one, check names or lengths.
+
+bw refs are '<item>' or '<item>:<field>'; names must match EXACTLY (they hold
+spaces and '·') -- call bw_list first. Default field: login password, else 'wert'.
+
+New random value: bw_generate. A value that already exists elsewhere: have the
+user run 'bwv import <item>' in a terminal (hidden prompt, no tool by design)."""
+
 TOOLS = [
     {
         "name": "secret_generate",
-        "description": (
-            "Create a new secret BLIND in the OS-native keyvault. The value is "
-            "generated locally and stored directly; it is never returned, "
-            "displayed, or logged. Fails if the name already exists."
-        ),
+        "description": "Create a keychain secret blind. Returns name and length only. Fails if the name exists; use secret_rotate instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Secret name (letters, digits, . _ -)"},
+                "name": {"type": "string", "description": "letters, digits, . _ -"},
                 "length": {"type": "integer", "default": 32, "minimum": 8},
             },
             "required": ["name"],
@@ -58,7 +66,7 @@ TOOLS = [
     },
     {
         "name": "secret_rotate",
-        "description": "Overwrite an existing secret with a freshly generated value (blind).",
+        "description": "Overwrite a keychain secret with a fresh blind value.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -70,7 +78,7 @@ TOOLS = [
     },
     {
         "name": "secret_list",
-        "description": "List secret names in the vault (names only, never values).",
+        "description": "List keychain secret names.",
         "inputSchema": {
             "type": "object",
             "properties": {"prefix": {"type": "string", "default": ""}},
@@ -78,7 +86,7 @@ TOOLS = [
     },
     {
         "name": "secret_delete",
-        "description": "Delete a secret from the vault.",
+        "description": "Delete a keychain secret.",
         "inputSchema": {
             "type": "object",
             "properties": {"name": {"type": "string"}},
@@ -87,25 +95,15 @@ TOOLS = [
     },
     {
         "name": "secret_run",
-        "description": (
-            "Run a command with secrets resolved into its environment at the "
-            "last possible moment (HSM-call semantics). `env` maps environment "
-            "variable names to secret names. The secret values never appear in "
-            "arguments, files, or logs, and any exact occurrence of a resolved "
-            "value in the captured stdout/stderr is redacted before returning."
-        ),
+        "description": "Run a command with keychain secrets in its environment. Output is redacted before it returns.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "command": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "argv of the command to run",
-                },
+                "command": {"type": "array", "items": {"type": "string"}, "description": "argv"},
                 "env": {
                     "type": "object",
                     "additionalProperties": {"type": "string"},
-                    "description": "mapping VAR -> secret name",
+                    "description": "VAR -> secret name",
                 },
                 "cwd": {"type": "string"},
                 "timeout_s": {"type": "integer", "default": 120},
@@ -115,11 +113,7 @@ TOOLS = [
     },
     {
         "name": "bw_list",
-        "description": (
-            "List Bitwarden item names (names only, never values). Use this to "
-            "find the exact item name a reference needs -- references must match "
-            "an item name exactly."
-        ),
+        "description": "List Bitwarden item names. Start here: references must match a name exactly.",
         "inputSchema": {
             "type": "object",
             "properties": {"prefix": {"type": "string", "default": ""}},
@@ -127,19 +121,14 @@ TOOLS = [
     },
     {
         "name": "bw_check",
-        "description": (
-            "Report the LENGTH of Bitwarden values without revealing them. "
-            "`refs` maps environment variable names to item references "
-            "('<item>' or '<item>:<field>'). Use this to verify a reference "
-            "resolves before wiring it into a command."
-        ),
+        "description": "Report each reference's value length. Confirms a reference resolves before you rely on it.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "refs": {
                     "type": "object",
                     "additionalProperties": {"type": "string"},
-                    "description": "mapping VAR -> '<item>' or '<item>:<field>'",
+                    "description": "VAR -> reference",
                 },
             },
             "required": ["refs"],
@@ -147,31 +136,41 @@ TOOLS = [
     },
     {
         "name": "bw_run",
-        "description": (
-            "Run a command with Bitwarden values resolved into its environment "
-            "at the last possible moment. `refs` maps environment variable names "
-            "to item references ('<item>' or '<item>:<field>'). The values are "
-            "resolved inside the bwv child and never enter this server; any exact "
-            "occurrence of a resolved value in the captured output is redacted "
-            "there before it is returned."
-        ),
+        "description": "Run a command with Bitwarden values in its environment. Output is redacted before it returns.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "command": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "argv of the command to run",
-                },
+                "command": {"type": "array", "items": {"type": "string"}, "description": "argv"},
                 "refs": {
                     "type": "object",
                     "additionalProperties": {"type": "string"},
-                    "description": "mapping VAR -> '<item>' or '<item>:<field>'",
+                    "description": "VAR -> reference",
                 },
                 "cwd": {"type": "string"},
                 "timeout_s": {"type": "integer", "default": 120},
             },
             "required": ["command", "refs"],
+        },
+    },
+    {
+        "name": "bw_generate",
+        "description": "Create a random Bitwarden value blind. Returns name and length only. Overwrites the item if it exists, which is the rotation path.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "reference; field defaults to 'wert'"},
+                "length": {"type": "integer", "default": 32, "minimum": 8},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "bw_delete",
+        "description": "Delete a Bitwarden item by exact name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"item": {"type": "string"}},
+            "required": ["item"],
         },
     },
 ]
@@ -321,6 +320,21 @@ def tool_call(name, args):
         )
         return {"exit_code": code, "stdout": out[-20000:], "stderr": err[-20000:]}
 
+    if name == "bw_generate":
+        item = args["item"]
+        length = int(args.get("length", 32))
+        code, out, err = bwv("generate", item, str(length))
+        if code != 0:
+            raise ValueError(err.strip() or "bwv generate failed")
+        return {"ok": True, "item": item, "length": length}
+
+    if name == "bw_delete":
+        item = args["item"]
+        code, out, err = bwv("delete", item)
+        if code != 0:
+            raise ValueError(err.strip() or "bwv delete failed")
+        return {"ok": True, "deleted": item}
+
     raise ValueError(f"unknown tool '{name}'")
 
 
@@ -349,6 +363,7 @@ def handle(msg):
             "protocolVersion": client_version,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "llm-secret-manager", "version": VERSION},
+            "instructions": INSTRUCTIONS,
         })
     if method == "ping":
         return ok({})

@@ -29,6 +29,7 @@ usage() {
 	cat >&2 <<'EOF'
 usage:
   bwv list [<prefix>]                              list item names (never values)
+  bwv generate <item>[:<field>] [<length>]         create a value blind (no TTY)
   bwv import <item>[:<field>]                      store a value (hidden prompt)
   bwv delete <item>                                remove an item
   bwv check <VAR>=<item>[:<field>] [...]           report value lengths only
@@ -134,9 +135,14 @@ PY
 		exit 0
 	fi
 
-	if [ "$mode" = import ]; then
+	if [ "$mode" = import ] || [ "$mode" = generate ]; then
 		# Not exec'd: the vault has to be locked again afterwards.
-		python3 "$BWV_SELF_DIR/bwv-import.py" "$1"
+		if [ "$mode" = generate ]; then
+			ref="$1"; len="${2:-32}"
+			python3 "$BWV_SELF_DIR/bwv-import.py" --generate "$len" "$ref"
+		else
+			python3 "$BWV_SELF_DIR/bwv-import.py" "$1"
+		fi
 		rc=$?
 		bw lock >/dev/null 2>&1 || true
 		exit "$rc"
@@ -188,6 +194,10 @@ case "$mode" in
 		;;
 	import|delete)
 		[ $# -eq 1 ] || usage
+		specs=()
+		;;
+	generate)
+		[ $# -ge 1 ] && [ $# -le 2 ] || usage
 		specs=()
 		;;
 	check|run)
