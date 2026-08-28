@@ -137,8 +137,10 @@ the naive version bit someone:
 
 The master password comes from the OS keychain via `bin/with-secrets`, so the
 unlock chain still ends in the native vault: no second credential store, and
-the same GUI-session rule applies. Machine callers export `BW_PASSWORD`
-directly instead (that is how the MCP server and the LaunchAgent run).
+the same GUI-session rule applies — which is why the MCP server runs as a
+LaunchAgent inside the logged-in session and gets `BWV_BOOTSTRAP` from its
+plist. A caller that already holds the master password (CI, a remote runner)
+exports `BW_PASSWORD` instead and skips the keychain step entirely.
 
 ## MCP server: give every agent a vault, not a secret
 
@@ -167,9 +169,14 @@ the output before it comes back. Same guarantee, enforced one process further
 out.
 
 ```bash
-scripts/install-launchagent.sh    # → http://127.0.0.1:8765/mcp (loopback only)
-claude mcp add --transport http native-vault http://127.0.0.1:8765/mcp
+BWV_BOOTSTRAP=my-bitwarden scripts/install-launchagent.sh   # → 127.0.0.1:8765/mcp
+claude mcp add --scope user --transport http llm-secret-manager http://127.0.0.1:8765/mcp
 ```
+
+`BWV_BOOTSTRAP` is only needed for the `bw_*` tools; without it the keychain
+tools still work. It is an item *name*, not a secret, so it belongs in the
+plist. A LaunchAgent inherits no `PATH`, so the template sets one — `bw` lives
+in a Homebrew prefix that would otherwise be invisible.
 
 Remote agents you trust (say, a headless build box) reach it through an SSH
 tunnel — the server never leaves loopback:

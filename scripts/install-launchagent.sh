@@ -1,15 +1,25 @@
 #!/bin/bash
 # Installs the nv-mcp LaunchAgent into the current user's GUI session.
 # Usage: scripts/install-launchagent.sh [port]   (default 8765)
+#
+# Set BWV_BOOTSTRAP to the keychain item holding the Bitwarden master password
+# to enable the bw_* tools:
+#   BWV_BOOTSTRAP=my-bitwarden scripts/install-launchagent.sh
+# It is an item name, not a secret, so it is fine in the plist. Without it the
+# keychain-only secret_* tools still work.
 set -euo pipefail
 
 PORT="${1:-8765}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 LABEL="com.llm-secret-manager.mcp"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+BOOTSTRAP="${BWV_BOOTSTRAP:-}"
+
+[ -n "$BOOTSTRAP" ] || echo "note: BWV_BOOTSTRAP unset - the bw_* (Bitwarden) tools will not be able to unlock" >&2
 
 mkdir -p "$HOME/Library/LaunchAgents"
 sed -e "s|__REPO__|$REPO|g" -e "s|__PORT__|$PORT|g" \
+	-e "s|__BWV_BOOTSTRAP__|$BOOTSTRAP|g" \
 	"$REPO/launchd/$LABEL.plist.template" > "$PLIST"
 
 # Reload cleanly if it was already installed.
