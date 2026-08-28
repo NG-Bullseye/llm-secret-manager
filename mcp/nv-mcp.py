@@ -124,14 +124,22 @@ def resolve_secret(name):
     this process; callers must only place it into a child's environment."""
     if not NAME_RE.match(name):
         raise ValueError(f"invalid secret name '{name}'")
-    p = subprocess.run(
-        ["security", "find-generic-password", "-a", os.environ.get("USER", ""),
-         "-s", name, "-w"],
-        capture_output=True, text=True, timeout=30,
+    # Same resolution order as bin/with-secrets: prefer the item stored under
+    # the current account, fall back to a service-only match. Existing items on
+    # a machine were created with inconsistent accounts; a name is the contract,
+    # not the account.
+    attempts = (
+        ["-a", os.environ.get("USER", ""), "-s", name],
+        ["-s", name],
     )
-    if p.returncode != 0:
-        raise ValueError(f"no secret named '{name}' (or keychain locked)")
-    return p.stdout.rstrip("\n")
+    for sel in attempts:
+        p = subprocess.run(
+            ["security", "find-generic-password", *sel, "-w"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if p.returncode == 0:
+            return p.stdout.rstrip("\n")
+    raise ValueError(f"no secret named '{name}' (or keychain locked)")
 
 
 def tool_call(name, args):
