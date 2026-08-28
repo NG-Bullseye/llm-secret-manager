@@ -29,6 +29,7 @@ usage() {
 	cat >&2 <<'EOF'
 usage:
   bwv list [<prefix>]                              list item names (never values)
+  bwv import <item>[:<field>]                      store a value (hidden prompt)
   bwv check <VAR>=<item>[:<field>] [...]           report value lengths only
   bwv run [--redact] <VAR>=<item>[:<field>] [...] -- <cmd...>
                                                    resolve refs into the child's env
@@ -112,6 +113,14 @@ PY
 		exit 0
 	fi
 
+	if [ "$mode" = import ]; then
+		# Not exec'd: the vault has to be locked again afterwards.
+		python3 "$BWV_SELF_DIR/bwv-import.py" "$1"
+		rc=$?
+		bw lock >/dev/null 2>&1 || true
+		exit "$rc"
+	fi
+
 	status=0
 	redact_vars=""
 	while IFS= read -r spec; do
@@ -156,6 +165,10 @@ case "$mode" in
 		[ $# -le 1 ] || usage
 		specs=()
 		;;
+	import)
+		[ $# -eq 1 ] || usage
+		specs=()
+		;;
 	check|run)
 		specs=()
 		if [ "$mode" = run ] && [ "${1:-}" = "--redact" ]; then
@@ -184,9 +197,12 @@ esac
 export BWV_SPECS
 BWV_SPECS="$( [ "${#specs[@]}" -gt 0 ] && printf '%s\n' "${specs[@]}" || true )"
 
-BWV_SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve through symlinks: bwv is normally reached through one on PATH, and
+# the helper scripts sit next to the REAL file, not next to the link.
+BWV_SELF="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+BWV_SELF_DIR="$(dirname "$BWV_SELF")"
 export BWV_SELF_DIR
-self="$BWV_SELF_DIR/$(basename "${BASH_SOURCE[0]}")"
+self="$BWV_SELF"
 
 # BW_PASSWORD already present (MCP server, LaunchAgent, CI): use it directly.
 # Otherwise bootstrap it out of the keychain, which needs an unlocked GUI

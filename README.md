@@ -99,12 +99,20 @@ contract against Bitwarden:
 export BWV_BOOTSTRAP=my-bitwarden           # keychain item holding the master password
 
 bwv list 'Railway · '                       # item names only
+bwv import 'Railway · Token:Token'          # hidden prompt, creates or updates
 bwv check TOKEN='Railway · Token:Token'     # → TOKEN: 36 chars   (never the value)
 bwv run TOKEN='Railway · Token:Token' -- ./deploy.sh
 ```
 
 There is no `get` verb here either. The vault is unlocked for exactly one
 resolution pass and locked again; the session key is never persisted.
+
+`import` is the rotation path: it reads the value from a hidden prompt (twice,
+and they must match), then hands it to `bw` on stdin — never through argv, a
+file, or a chat message. An existing item is updated in place rather than
+recreated, so it keeps its folder and history. It refuses to run without a
+terminal, because a pipe means the value came from somewhere it should not
+have been.
 
 Three things it does differently from a hand-rolled `bw` wrapper, each because
 the naive version bit someone:
