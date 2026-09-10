@@ -57,3 +57,31 @@
   semantics are the feature; nothing is re-implemented, so nothing can drift.
 - Adding backends (Linux `secret-tool`, Windows Credential Manager) must
   preserve invariants 1–4 or not be added at all.
+
+## The Bitwarden backend (`bin/bwv`)
+
+Bitwarden is not an OS-native vault, so guarantee 3 changes shape: storage and
+crypto are Bitwarden's, and the *master password* is what the OS keychain
+protects. The unlock chain therefore still terminates in the native vault —
+`BWV_BOOTSTRAP` names the keychain item, `bin/with-secrets` injects it, and the
+GUI-session rule applies unchanged. No second credential store is introduced.
+
+Guarantee 1 needs one extra hop. The MCP server delegates to `bwv`, so it never
+holds a resolved value and could not recognise one in the output. Redaction
+therefore happens inside `bwv` (`bin/bwv-redact.py`), which does hold it —
+`bw_run` always passes `--redact`. The CLI path deliberately does not redact:
+`bwv run` hands the child the operator's own terminal, and filtering a human's
+own output buys nothing while breaking streaming and interactivity.
+
+Residual risks specific to this backend:
+
+- **Unlock window.** `bw unlock` produces a session key that exists for one
+  resolution pass. It is never written to disk, but during that window any
+  process running as the same user can use the CLI — the same-user assumption
+  above applies here too.
+- **Reference disclosure.** Item names travel on argv and appear in logs and
+  transcripts. They are references, not secrets, but they do leak vault
+  structure (which services exist, which environments). Name items accordingly.
+- **Sync trust.** `bwv` calls `bw sync` before resolving, which contacts the
+  Bitwarden server. An attacker controlling that server controls what a
+  reference resolves to. That is inherent to using a hosted vault at all.

@@ -32,21 +32,33 @@ NV_BIN = os.environ.get(
     "NV_BIN",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "nv"),
 )
+BWV_BIN = os.environ.get(
+    "BWV_BIN",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin", "bwv"),
+)
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Shared rules live here, not repeated in every tool description: this is sent
+# once at initialize, while descriptions are carried in the model's context for
+# the whole session.
+INSTRUCTIONS = """secret_* = macOS keychain, bw_* = Bitwarden. No tool returns a value:
+to use one, inject it with *_run; to verify one, check names or lengths.
+
+bw refs are '<item>' or '<item>:<field>'; names must match EXACTLY (they hold
+spaces and '·') -- call bw_list first. Default field: login password, else 'wert'.
+
+New random value: bw_generate. A value that already exists elsewhere: have the
+user run 'bwv import <item>' in a terminal (hidden prompt, no tool by design)."""
 
 TOOLS = [
     {
         "name": "secret_generate",
-        "description": (
-            "Create a new secret BLIND in the OS-native keyvault. The value is "
-            "generated locally and stored directly; it is never returned, "
-            "displayed, or logged. Fails if the name already exists."
-        ),
+        "description": "Create a keychain secret blind. Returns name and length only. Fails if the name exists; use secret_rotate instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Secret name (letters, digits, . _ -)"},
+                "name": {"type": "string", "description": "letters, digits, . _ -"},
                 "length": {"type": "integer", "default": 32, "minimum": 8},
             },
             "required": ["name"],
@@ -54,7 +66,7 @@ TOOLS = [
     },
     {
         "name": "secret_rotate",
-        "description": "Overwrite an existing secret with a freshly generated value (blind).",
+        "description": "Overwrite a keychain secret with a fresh blind value.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -66,7 +78,7 @@ TOOLS = [
     },
     {
         "name": "secret_list",
-        "description": "List secret names in the vault (names only, never values).",
+        "description": "List keychain secret names.",
         "inputSchema": {
             "type": "object",
             "properties": {"prefix": {"type": "string", "default": ""}},
@@ -74,7 +86,7 @@ TOOLS = [
     },
     {
         "name": "secret_delete",
-        "description": "Delete a secret from the vault.",
+        "description": "Delete a keychain secret.",
         "inputSchema": {
             "type": "object",
             "properties": {"name": {"type": "string"}},
@@ -83,30 +95,82 @@ TOOLS = [
     },
     {
         "name": "secret_run",
-        "description": (
-            "Run a command with secrets resolved into its environment at the "
-            "last possible moment (HSM-call semantics). `env` maps environment "
-            "variable names to secret names. The secret values never appear in "
-            "arguments, files, or logs, and any exact occurrence of a resolved "
-            "value in the captured stdout/stderr is redacted before returning."
-        ),
+        "description": "Run a command with keychain secrets in its environment. Output is redacted before it returns.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "command": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "argv of the command to run",
-                },
+                "command": {"type": "array", "items": {"type": "string"}, "description": "argv"},
                 "env": {
                     "type": "object",
                     "additionalProperties": {"type": "string"},
-                    "description": "mapping VAR -> secret name",
+                    "description": "VAR -> secret name",
                 },
                 "cwd": {"type": "string"},
                 "timeout_s": {"type": "integer", "default": 120},
             },
             "required": ["command", "env"],
+        },
+    },
+    {
+        "name": "bw_list",
+        "description": "List Bitwarden item names. Start here: references must match a name exactly.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"prefix": {"type": "string", "default": ""}},
+        },
+    },
+    {
+        "name": "bw_check",
+        "description": "Report each reference's value length. Confirms a reference resolves before you rely on it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "refs": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "VAR -> reference",
+                },
+            },
+            "required": ["refs"],
+        },
+    },
+    {
+        "name": "bw_run",
+        "description": "Run a command with Bitwarden values in its environment. Output is redacted before it returns.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "array", "items": {"type": "string"}, "description": "argv"},
+                "refs": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "VAR -> reference",
+                },
+                "cwd": {"type": "string"},
+                "timeout_s": {"type": "integer", "default": 120},
+            },
+            "required": ["command", "refs"],
+        },
+    },
+    {
+        "name": "bw_generate",
+        "description": "Create a random Bitwarden value blind. Returns name and length only. Overwrites the item if it exists, which is the rotation path.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string", "description": "reference; field defaults to 'wert'"},
+                "length": {"type": "integer", "default": 32, "minimum": 8},
+            },
+            "required": ["item"],
+        },
+    },
+    {
+        "name": "bw_delete",
+        "description": "Delete a Bitwarden item by exact name.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"item": {"type": "string"}},
+            "required": ["item"],
         },
     },
 ]
@@ -117,6 +181,29 @@ def nv(*args, timeout=30):
         [NV_BIN, *args], capture_output=True, text=True, timeout=timeout
     )
     return p.returncode, p.stdout.strip(), p.stderr.strip()
+
+
+def bwv(*args, timeout=120, cwd=None):
+    """Invoke the Bitwarden backend. Only references travel on argv; the
+    resolved values stay inside the bwv child and never reach this process."""
+    p = subprocess.run(
+        [BWV_BIN, *args], capture_output=True, text=True, timeout=timeout, cwd=cwd
+    )
+    return p.returncode, p.stdout, p.stderr
+
+
+def bw_specs(refs):
+    """Turn a {VAR: reference} mapping into bwv's VAR=<ref> argument list."""
+    specs = []
+    for var, ref in refs.items():
+        if not VAR_RE.match(var):
+            raise ValueError(f"invalid variable name '{var}'")
+        if not isinstance(ref, str) or not ref:
+            raise ValueError(f"invalid reference for '{var}'")
+        specs.append(f"{var}={ref}")
+    if not specs:
+        raise ValueError("refs must not be empty")
+    return specs
 
 
 def resolve_secret(name):
@@ -199,6 +286,55 @@ def tool_call(name, args):
             err = err.replace(value, f"[REDACTED:{var}]")
         return {"exit_code": p.returncode, "stdout": out[-20000:], "stderr": err[-20000:]}
 
+    if name == "bw_list":
+        prefix = args.get("prefix") or ""
+        code, out, err = bwv("list", *([prefix] if prefix else []))
+        if code != 0:
+            raise ValueError(err.strip() or "bwv list failed")
+        return {"names": out.splitlines()}
+
+    if name == "bw_check":
+        specs = bw_specs(args["refs"])
+        code, out, err = bwv("check", *specs)
+        if code != 0:
+            raise ValueError(err.strip() or "bwv check failed")
+        # bwv prints "VAR: N chars" per reference; hand back structured data.
+        lengths = {}
+        for line in out.splitlines():
+            var, _, rest = line.partition(":")
+            lengths[var.strip()] = int(rest.strip().split()[0])
+        return {"lengths": lengths}
+
+    if name == "bw_run":
+        command = args["command"]
+        if not isinstance(command, list) or not command:
+            raise ValueError("command must be a non-empty argv array")
+        specs = bw_specs(args["refs"])
+        # --redact is mandatory on this path: the server never holds the values,
+        # so it cannot recognise them itself -- bwv, which does hold them,
+        # filters the child's output before it ever comes back here.
+        code, out, err = bwv(
+            "run", "--redact", *specs, "--", *command,
+            timeout=int(args.get("timeout_s", 120)),
+            cwd=args.get("cwd") or None,
+        )
+        return {"exit_code": code, "stdout": out[-20000:], "stderr": err[-20000:]}
+
+    if name == "bw_generate":
+        item = args["item"]
+        length = int(args.get("length", 32))
+        code, out, err = bwv("generate", item, str(length))
+        if code != 0:
+            raise ValueError(err.strip() or "bwv generate failed")
+        return {"ok": True, "item": item, "length": length}
+
+    if name == "bw_delete":
+        item = args["item"]
+        code, out, err = bwv("delete", item)
+        if code != 0:
+            raise ValueError(err.strip() or "bwv delete failed")
+        return {"ok": True, "deleted": item}
+
     raise ValueError(f"unknown tool '{name}'")
 
 
@@ -227,6 +363,7 @@ def handle(msg):
             "protocolVersion": client_version,
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "llm-secret-manager", "version": VERSION},
+            "instructions": INSTRUCTIONS,
         })
     if method == "ping":
         return ok({})

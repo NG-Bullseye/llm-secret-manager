@@ -89,18 +89,94 @@ Native rules apply unchanged: the login keychain only opens inside an
 Apple's access model doing its job (and why the MCP server below runs as a
 LaunchAgent inside your session).
 
-## MCP server: give every agent a vault, not a secret
+## Shared vaults: the Bitwarden backend
 
-`mcp/nv-mcp.py` (Python ≥ 3.9, **zero dependencies**) exposes five tools:
-`secret_generate` · `secret_rotate` · `secret_list` · `secret_delete` ·
-`secret_run`. Values resolve inside the server process and go into the child's
-environment; any **exact occurrence of a resolved value in captured output is
-redacted** before results return to the client.
+The login keychain is *yours*. Team and customer secrets usually live in a
+shared vault instead, and `nv` cannot reach those. `bin/bwv` is the same
+contract against Bitwarden:
 
 ```bash
-scripts/install-launchagent.sh    # → http://127.0.0.1:8765/mcp (loopback only)
-claude mcp add --transport http native-vault http://127.0.0.1:8765/mcp
+export BWV_BOOTSTRAP=my-bitwarden           # keychain item holding the master password
+
+bwv list 'Railway · '                       # item names only
+bwv generate 'Railway · Token' 40           # blind: random value, never shown
+bwv import 'Railway · Token:Token'          # hidden prompt, for a value that exists
+bwv check TOKEN='Railway · Token:Token'     # → TOKEN: 36 chars   (never the value)
+bwv run TOKEN='Railway · Token:Token' -- ./deploy.sh
+bwv delete 'Railway · Token'                # exact name, or it refuses
 ```
+
+There is no `get` verb here either. The vault is unlocked for exactly one
+resolution pass and locked again; the session key is never persisted.
+
+`generate` and `import` differ only in where the value comes from, and that
+difference decides who may call them. `generate` draws it from `os.urandom`
+and writes it straight to the vault — no human, no terminal, and therefore the
+path an agent uses. `import` is for a value that already exists somewhere else
+(a provider's web UI) and has to be typed: hidden prompt, twice, and they must
+match. It refuses to run without a terminal, because a pipe would mean the
+value came from a file, an argument, or a chat message.
+
+Both hand the value to `bw` on stdin, never through argv, and both update an
+existing item in place rather than recreating it, so it keeps its folder and
+history — that is the rotation path.
+
+Three things it does differently from a hand-rolled `bw` wrapper, each because
+the naive version bit someone:
+
+- **Exact item names.** `bw get item` matches substrings, so `Railway · Token`
+  can resolve to several items and fail — or worse, to the wrong one. A
+  reference that does not match exactly one item is an error.
+- **`bw sync` first.** An item created in the web or desktop app is invisible
+  to the CLI until a sync. Skipping it produces "no such item" for an item you
+  are looking at on screen.
+- **Explicit fields.** `:<field>` selects a login field (`username`,
+  `password`) or a custom field by exact name; without it, login password then
+  custom field `wert`. When resolution fails, the error names the fields the
+  item actually has — that one line is usually the whole debugging session.
+
+The master password comes from the OS keychain via `bin/with-secrets`, so the
+unlock chain still ends in the native vault: no second credential store, and
+the same GUI-session rule applies — which is why the MCP server runs as a
+LaunchAgent inside the logged-in session and gets `BWV_BOOTSTRAP` from its
+plist. A caller that already holds the master password (CI, a remote runner)
+exports `BW_PASSWORD` instead and skips the keychain step entirely.
+
+## MCP server: give every agent a vault, not a secret
+
+`mcp/nv-mcp.py` (Python ≥ 3.9, **zero dependencies**) exposes ten tools:
+`secret_generate` · `secret_rotate` · `secret_list` · `secret_delete` ·
+`secret_run` for the keychain, and `bw_list` · `bw_check` · `bw_run` ·
+`bw_generate` · `bw_delete` for Bitwarden. Shared rules (reference syntax,
+exact-name matching, "no tool returns a value") are sent once in the server's
+`instructions` rather than repeated in every description — those descriptions
+sit in the model's context for the whole session, so they are kept to one line
+each.
+
+`bwv import` deliberately has **no** MCP tool. It is the path for a value that
+already exists somewhere else and a human has to type it; a tool for that would
+only invite an agent to route the secret through its own context first. What an
+agent needs instead is `bw_generate`, which orders a value into existence
+without anyone seeing it.
+
+Values resolve inside the server process and go into the child's environment;
+any **exact occurrence of a resolved value in captured output is redacted**
+before results return to the client.
+
+On the Bitwarden path the server never holds the value at all — `bwv` resolves
+it in its own child — so `bw_run` passes `--redact`, which makes `bwv` filter
+the output before it comes back. Same guarantee, enforced one process further
+out.
+
+```bash
+BWV_BOOTSTRAP=my-bitwarden scripts/install-launchagent.sh   # → 127.0.0.1:8765/mcp
+claude mcp add --scope user --transport http llm-secret-manager http://127.0.0.1:8765/mcp
+```
+
+`BWV_BOOTSTRAP` is only needed for the `bw_*` tools; without it the keychain
+tools still work. It is an item *name*, not a secret, so it belongs in the
+plist. A LaunchAgent inherits no `PATH`, so the template sets one — `bw` lives
+in a Homebrew prefix that would otherwise be invisible.
 
 Remote agents you trust (say, a headless build box) reach it through an SSH
 tunnel — the server never leaves loopback:
