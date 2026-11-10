@@ -1,5 +1,7 @@
 # ARCHITECTURE — llm-secret-manager
 
+> Stand 2026-11-10 · geprüft gegen 9af2ea9
+
 ## Deep Modules — Agent bestellt, rotiert und nutzt Secrets, liest sie nie
 
 Flow: ein Agent ruft `nv`/`bwv` direkt oder über den MCP-Server `mcp/nv-mcp.py`; Secrets bleiben Referenzen (`VAR=name`) und werden erst beim `run` in die Umgebung des Zielprozesses aufgelöst. Der guard hook blockt Befehle, die einen Wert ausgeben würden. Keine Flow-Datei; die Sequenz lebt in `mcp/nv-mcp.py::tool_call`. Jede Innenleben-Zelle ist datei:zeile und muss per grep -n treffen.
@@ -31,3 +33,17 @@ Flow: ein Agent ruft `nv`/`bwv` direkt oder über den MCP-Server `mcp/nv-mcp.py`
 ## Standard: Deep Modules + Flow
 
 Standard R1–R5 steht in `~/repos/speech-engine/ARCHITECTURE.md`.
+
+<!-- graph:auto:start -->
+## Graph-Auto (generated 2026-11-10 by `bin/arch_auto_block.py`, do not edit by hand)
+
+**Deep Modules** (cross-file edges):
+- `uninstall.sh` — 3
+- `install.sh` — 3
+
+**Interfaces** (modules/symbols imported or called from other files):
+- none
+
+**Bus connections** (redis / route / http nodes of the house graph):
+- none
+<!-- graph:auto:end -->
